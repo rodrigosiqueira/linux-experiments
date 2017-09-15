@@ -2134,6 +2134,14 @@ SYSCALL_DEFINE5(clone, unsigned long, clone_flags, unsigned long, newsp,
 }
 #endif
 
+#ifdef CONFIG_ATOMIZE
+SYSCALL_DEFINE0(atomize)
+{
+	pr_info("TODO: Show time! Atomize this process!");
+	return 0;
+}
+#endif
+
 void walk_process_tree(struct task_struct *top, proc_visitor visitor, void *data)
 {
 	struct task_struct *leader, *parent, *child;

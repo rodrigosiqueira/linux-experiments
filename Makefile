@@ -1,7 +1,7 @@
 VERSION = 4
 PATCHLEVEL = 12
 SUBLEVEL = 10
-EXTRAVERSION = -eudyptula
+EXTRAVERSION = -play-with-kernel
 NAME = Siqueira
 
 # *DOCUMENTATION*

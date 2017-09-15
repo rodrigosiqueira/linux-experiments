@@ -1,0 +1,7 @@
+config PROCESS_ATOMIZE
+	bool "Support for process atomization (EXPERIMENTAL)"
+	default n
+	help
+	  Support for processes atomization
+
+	  If not sure, then say N

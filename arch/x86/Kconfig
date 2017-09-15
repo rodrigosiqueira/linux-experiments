@@ -972,6 +972,7 @@ config SCHED_MC_PRIO
 	  If unsure say Y here.
 
 source "kernel/Kconfig.preempt"
+source "kernel/Kconfig.atomize"
 
 config UP_LATE_INIT
        def_bool y
