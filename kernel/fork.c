@@ -2140,6 +2140,22 @@ SYSCALL_DEFINE0(atomize)
 	pr_info("TODO: Show time! Atomize this process!");
 	return 0;
 }
+
+static struct kset * atomize_kset;
+
+static int __init atomize_sysfs_init(void)
+{
+	atomize_kset = kset_create_and_add("atomize", NULL, kernel_kobj);
+	if (!atomize_kset)
+	{
+		pr_err("Atomize entry on sysfs failed\n");
+		return -ENOMEM;
+	}
+
+	return 0;
+}
+postcore_initcall(atomize_sysfs_init);
+
 #endif
 
 void walk_process_tree(struct task_struct *top, proc_visitor visitor, void *data)
