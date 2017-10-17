@@ -2137,7 +2137,10 @@ SYSCALL_DEFINE5(clone, unsigned long, clone_flags, unsigned long, newsp,
 #ifdef CONFIG_ATOMIZE
 SYSCALL_DEFINE0(atomize)
 {
-	pr_info("TODO: Show time! Atomize this process!");
+	unsigned long pid = 0;
+	pr_info("atomize: under construction");
+	pid = task_pid_nr(current);
+	pr_debug("Current process pid: %ld", pid);
 	return 0;
 }
 
