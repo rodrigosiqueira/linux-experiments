@@ -2135,16 +2135,140 @@ SYSCALL_DEFINE5(clone, unsigned long, clone_flags, unsigned long, newsp,
 #endif
 
 #ifdef CONFIG_ATOMIZE
-SYSCALL_DEFINE0(atomize)
+
+#include <linux/atomize.h>
+#include <linux/sysfs.h>
+
+#define ATOMIZE_MAX_ID INT_MAX
+
+/* Atomize cache element initialized during kernel start */
+static struct kmem_cache * atomize_cache;
+static struct idr atomizations;
+static spinlock_t atomizations_lock;
+
+/* Atomize sysfs */
+static struct kset * atomize_kset;
+
+struct atomize_sysfs_attr {
+	struct attribute attr;
+	ssize_t (*show)(struct particle *p, struct atomize_sysfs_attr *a,
+			char *buf);
+	ssize_t (*store)(struct particle *p, struct atomize_sysfs_attr *a,
+				const char *buf, size_t count);
+};
+
+#define ATOMIZE_ATTR(NAME, MODE, SHOW, STORE)			\
+static struct atomize_sysfs_attr atomize_sysfs_attr_##NAME =	\
+	__ATTR(NAME, MODE, SHOW, STORE)
+
+static ssize_t atomize_sysfs_attr_show(struct kobject *kobj,
+					struct attribute *attr,
+					char *buf)
 {
-	unsigned long pid = 0;
-	pr_info("atomize: under construction");
-	pid = task_pid_nr(current);
-	pr_debug("Current process pid: %ld", pid);
-	return 0;
+	struct particle *p = NULL;
+	struct atomize_sysfs_attr *a = NULL;
+
+	p = container_of(kobj, struct particle, kobj);
+	a = container_of(attr, struct atomize_sysfs_attr, attr);
+
+	if (!a->show)
+		return -EIO;
+
+	return a->show(p, a, buf);
 }
 
-static struct kset * atomize_kset;
+static ssize_t atomize_sysfs_attr_store(struct kobject *kobj,
+					struct attribute *attr,
+					const char *buf, size_t count)
+{
+	struct particle *p = NULL;
+	struct atomize_sysfs_attr *a = NULL;
+
+	p = container_of(kobj, struct particle, kobj);
+	a = container_of(attr, struct atomize_sysfs_attr, attr);
+
+	if (!a->store)
+		return -EIO;
+
+	return a->store(p, a, buf, count);
+}
+
+static const struct sysfs_ops atomize_sysfs_ops = {
+	.show = atomize_sysfs_attr_show,
+	.store = atomize_sysfs_attr_store,
+};
+
+static ssize_t show_atomize_pid(struct particle *p,
+				struct atomize_sysfs_attr *a,
+				char *buf)
+{
+	return sprintf(buf, "%ld", p->pid);
+}
+ATOMIZE_ATTR(pid, 0444, show_atomize_pid, NULL);
+
+static ssize_t show_atomize_id(struct particle *p,
+				struct atomize_sysfs_attr *a,
+				char *buf)
+{
+	return sprintf(buf, "%d", p->id);
+}
+ATOMIZE_ATTR(id, 0444, show_atomize_id, NULL);
+
+/* Each element in this array was created by ATOMIZE_ATTR */
+static struct attribute *atomize_default_attr[] = {
+	&atomize_sysfs_attr_id.attr,
+	&atomize_sysfs_attr_pid.attr,
+	NULL
+};
+
+static void atomize_release(struct kobject *kobj)
+{
+	struct particle *p = container_of(kobj, struct particle, kobj);
+
+	spin_lock(&atomizations_lock);
+	idr_remove(&atomizations, p->id);
+	spin_unlock(&atomizations_lock);
+	// TODO: Do we need RCU stuffs? Something to call call_rcu?
+}
+
+static struct kobj_type atomize_ktype = {
+	.sysfs_ops = &atomize_sysfs_ops,
+	.release = atomize_release,
+	.default_attrs = atomize_default_attr,
+};
+
+static inline struct particle * new_particle(void)
+{
+	return kmem_cache_zalloc(atomize_cache, GFP_KERNEL);
+}
+
+static int register_particle_on_sysfs(struct particle * p)
+{
+	int rc = 0;
+	/* TODO: Come back here, and check this lock again. Can we have a
+	 * performance issue here? */
+	spin_lock(&atomizations_lock);
+	rc = idr_alloc(&atomizations, p, 1, ATOMIZE_MAX_ID, GFP_KERNEL);
+	spin_unlock(&atomizations_lock);
+
+	if (rc < 0) {
+		//TODO: Should free p
+		pr_err("Could not alloc idr");
+		return rc;
+	}
+
+	p->id = rc;
+	p->kobj.kset = atomize_kset;
+
+	rc = kobject_init_and_add(&p->kobj, &atomize_ktype, NULL, "%d", p->id);
+	if (rc != 0) {
+		// TODO: We should remove atomize
+		pr_err("Could not add the new atomization in the hierarchy");
+		return rc;
+	}
+	// TODO: Should I trigger an event with kobject_uevent?
+	return 0;
+}
 
 static int __init atomize_sysfs_init(void)
 {
@@ -2158,6 +2282,32 @@ static int __init atomize_sysfs_init(void)
 	return 0;
 }
 postcore_initcall(atomize_sysfs_init);
+
+void atomize_init(void)
+{
+	atomize_cache = KMEM_CACHE(particle, SLAB_PANIC|SLAB_NOTRACK);
+	idr_init(&atomizations);
+	spin_lock_init(&atomizations_lock);
+}
+
+SYSCALL_DEFINE0(atomize)
+{
+	struct particle * p = NULL;
+	unsigned long pid = 0;
+	int rc = 0;
+
+	p = new_particle();
+
+	if (!p)
+		return -ENOMEM;
+
+	pid = task_pid_nr(current);
+	p->pid = pid;
+
+	rc = register_particle_on_sysfs(p);
+
+	return 0;
+}
 
 #endif
 
