@@ -2142,12 +2142,12 @@ SYSCALL_DEFINE5(clone, unsigned long, clone_flags, unsigned long, newsp,
 #define ATOMIZE_MAX_ID INT_MAX
 
 /* Atomize cache element initialized during kernel start */
-static struct kmem_cache * atomize_cache;
+static struct kmem_cache *atomize_cache;
 static struct idr atomizations;
 static spinlock_t atomizations_lock;
 
 /* Atomize sysfs */
-static struct kset * atomize_kset;
+static struct kset *atomize_kset;
 
 struct atomize_sysfs_attr {
 	struct attribute attr;
@@ -2237,16 +2237,17 @@ static struct kobj_type atomize_ktype = {
 	.default_attrs = atomize_default_attr,
 };
 
-static inline struct particle * new_particle(void)
+static inline struct particle *new_particle(void)
 {
 	return kmem_cache_zalloc(atomize_cache, GFP_KERNEL);
 }
 
-static int register_particle_on_sysfs(struct particle * p)
+static int register_particle_on_sysfs(struct particle *p)
 {
 	int rc = 0;
 	/* TODO: Come back here, and check this lock again. Can we have a
-	 * performance issue here? */
+	 * performance issue here?
+	 */
 	spin_lock(&atomizations_lock);
 	rc = idr_alloc(&atomizations, p, 1, ATOMIZE_MAX_ID, GFP_KERNEL);
 	spin_unlock(&atomizations_lock);
@@ -2273,8 +2274,7 @@ static int register_particle_on_sysfs(struct particle * p)
 static int __init atomize_sysfs_init(void)
 {
 	atomize_kset = kset_create_and_add("atomize", NULL, kernel_kobj);
-	if (!atomize_kset)
-	{
+	if (!atomize_kset) {
 		pr_err("Atomize entry on sysfs failed\n");
 		return -ENOMEM;
 	}
@@ -2292,7 +2292,7 @@ void atomize_init(void)
 
 SYSCALL_DEFINE0(atomize)
 {
-	struct particle * p = NULL;
+	struct particle *p = NULL;
 	unsigned long pid = 0;
 	int rc = 0;
 
@@ -2305,6 +2305,8 @@ SYSCALL_DEFINE0(atomize)
 	p->pid = pid;
 
 	rc = register_particle_on_sysfs(p);
+	if (rc < 0)
+		return rc;
 
 	return 0;
 }
