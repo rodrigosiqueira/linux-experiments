@@ -2141,10 +2141,9 @@ SYSCALL_DEFINE5(clone, unsigned long, clone_flags, unsigned long, newsp,
 
 #define ATOMIZE_MAX_ID INT_MAX
 
-/* Atomize cache element initialized during kernel start */
-static struct kmem_cache *atomize_cache;
-static struct idr atomizations;
-static spinlock_t atomizations_lock;
+/* Required elements to be use during the atomization processes */
+static struct kmem_cache *particle_cache;
+static struct atom atomizations;
 
 /* Atomize sysfs */
 static struct kset *atomize_kset;
@@ -2202,7 +2201,7 @@ static ssize_t show_atomize_pid(struct particle *p,
 				struct atomize_sysfs_attr *a,
 				char *buf)
 {
-	return sprintf(buf, "%ld", p->pid);
+	return sprintf(buf, "%d\n", p->composition->pid);
 }
 ATOMIZE_ATTR(pid, 0444, show_atomize_pid, NULL);
 
@@ -2210,7 +2209,7 @@ static ssize_t show_atomize_id(struct particle *p,
 				struct atomize_sysfs_attr *a,
 				char *buf)
 {
-	return sprintf(buf, "%d", p->id);
+	return sprintf(buf, "%d\n", p->id);
 }
 ATOMIZE_ATTR(id, 0444, show_atomize_id, NULL);
 
@@ -2225,9 +2224,9 @@ static void atomize_release(struct kobject *kobj)
 {
 	struct particle *p = container_of(kobj, struct particle, kobj);
 
-	spin_lock(&atomizations_lock);
-	idr_remove(&atomizations, p->id);
-	spin_unlock(&atomizations_lock);
+	spin_lock(&atomizations.atomize_lock);
+	idr_remove(&atomizations.particles, p->id);
+	spin_unlock(&atomizations.atomize_lock);
 	// TODO: Do we need RCU stuffs? Something to call call_rcu?
 }
 
@@ -2239,28 +2238,19 @@ static struct kobj_type atomize_ktype = {
 
 static inline struct particle *new_particle(void)
 {
-	return kmem_cache_zalloc(atomize_cache, GFP_KERNEL);
+	return kmem_cache_zalloc(particle_cache, GFP_KERNEL);
 }
 
 static int register_particle_on_sysfs(struct particle *p)
 {
 	int rc = 0;
-	/* TODO: Come back here, and check this lock again. Can we have a
-	 * performance issue here?
-	 */
-	spin_lock(&atomizations_lock);
-	rc = idr_alloc(&atomizations, p, 1, ATOMIZE_MAX_ID, GFP_KERNEL);
-	spin_unlock(&atomizations_lock);
 
-	if (rc < 0) {
-		//TODO: Should free p
-		pr_err("Could not alloc idr");
-		return rc;
-	}
-
-	p->id = rc;
 	p->kobj.kset = atomize_kset;
 
+	/* FIXME: In a near future, I want to add only the PID entry on sys.
+	 * Inside each pid dir, I want a dir per id, and finally the attributes
+	 * per particle
+	 */
 	rc = kobject_init_and_add(&p->kobj, &atomize_ktype, NULL, "%d", p->id);
 	if (rc != 0) {
 		// TODO: We should remove atomize
@@ -2285,30 +2275,50 @@ postcore_initcall(atomize_sysfs_init);
 
 void atomize_init(void)
 {
-	atomize_cache = KMEM_CACHE(particle, SLAB_PANIC|SLAB_NOTRACK);
-	idr_init(&atomizations);
-	spin_lock_init(&atomizations_lock);
+	particle_cache = KMEM_CACHE(particle, SLAB_PANIC|SLAB_NOTRACK);
+	// TODO: Is it worth to cache atom?
+	idr_init(&atomizations.particles);
+	spin_lock_init(&atomizations.atomize_lock);
 }
 
-SYSCALL_DEFINE0(atomize)
+int transmutation(void)
 {
 	struct particle *p = NULL;
-	unsigned long pid = 0;
 	int rc = 0;
 
+	// FIXME: Copy process should be added to a specific function
 	p = new_particle();
-
 	if (!p)
 		return -ENOMEM;
 
-	pid = task_pid_nr(current);
-	p->pid = pid;
+	p->composition = dup_task_struct(current, NUMA_NO_NODE);
+	if (!p)
+		return -ENOMEM;
 
+	// FIXME: Add to idr and sysfs should be a specific function each
+	spin_lock(&atomizations.atomize_lock);
+	p->id = idr_alloc(&atomizations.particles, p, 1, ATOMIZE_MAX_ID,
+				GFP_KERNEL);
+	spin_unlock(&atomizations.atomize_lock);
+	if (p->id < 0) {
+		//TODO: Should free p
+		pr_err("Could not alloc idr");
+		return rc;
+	}
+
+	// FIXME: If register to sysfs fail, should clean idr and particle
 	rc = register_particle_on_sysfs(p);
 	if (rc < 0)
 		return rc;
 
-	return 0;
+	return p->id;
+}
+
+//FIXME: atomize should accept parameter, and based on them we act
+SYSCALL_DEFINE0(atomize)
+{
+	//TODO: We have to handle the different value returned
+	return transmutation();
 }
 
 #endif
