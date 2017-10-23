@@ -2153,7 +2153,7 @@ struct atomize_sysfs_attr {
 	ssize_t (*show)(struct particle *p, struct atomize_sysfs_attr *a,
 			char *buf);
 	ssize_t (*store)(struct particle *p, struct atomize_sysfs_attr *a,
-				const char *buf, size_t count);
+			 const char *buf, size_t count);
 };
 
 #define ATOMIZE_ATTR(NAME, MODE, SHOW, STORE)			\
@@ -2161,8 +2161,8 @@ static struct atomize_sysfs_attr atomize_sysfs_attr_##NAME =	\
 	__ATTR(NAME, MODE, SHOW, STORE)
 
 static ssize_t atomize_sysfs_attr_show(struct kobject *kobj,
-					struct attribute *attr,
-					char *buf)
+				       struct attribute *attr,
+				       char *buf)
 {
 	struct particle *p = NULL;
 	struct atomize_sysfs_attr *a = NULL;
@@ -2206,8 +2206,8 @@ static ssize_t show_atomize_pid(struct particle *p,
 ATOMIZE_ATTR(pid, 0444, show_atomize_pid, NULL);
 
 static ssize_t show_atomize_id(struct particle *p,
-				struct atomize_sysfs_attr *a,
-				char *buf)
+			       struct atomize_sysfs_attr *a,
+			       char *buf)
 {
 	return sprintf(buf, "%d\n", p->id);
 }
@@ -2273,9 +2273,17 @@ static int __init atomize_sysfs_init(void)
 }
 postcore_initcall(atomize_sysfs_init);
 
+static struct particle *particle_lookup(int id)
+{
+	struct particle *p = NULL;
+
+	p = idr_find(&atomizations.particles, id);
+	return p;
+}
+
 void atomize_init(void)
 {
-	particle_cache = KMEM_CACHE(particle, SLAB_PANIC|SLAB_NOTRACK);
+	particle_cache = KMEM_CACHE(particle, SLAB_PANIC | SLAB_NOTRACK);
 	// TODO: Is it worth to cache atom?
 	idr_init(&atomizations.particles);
 	spin_lock_init(&atomizations.atomize_lock);
@@ -2314,11 +2322,38 @@ int transmutation(void)
 	return p->id;
 }
 
-//FIXME: atomize should accept parameter, and based on them we act
-SYSCALL_DEFINE0(atomize)
+int destroy(int id)
 {
-	//TODO: We have to handle the different value returned
-	return transmutation();
+	struct particle *p = NULL;
+
+	p = particle_lookup(id);
+	if (!p)
+		return -EINVAL;
+
+	free_task(p->composition);
+
+	spin_lock(&atomizations.atomize_lock);
+	idr_remove(&atomizations.particles, p->id);
+	spin_unlock(&atomizations.atomize_lock);
+
+	kobject_put(&p->kobj);
+
+	return 0;
+}
+
+SYSCALL_DEFINE2(atomize, int, atomizeflg, int, id)
+{
+	if (atomizeflg & ~(TRANSMUTATION | DESTROY))
+		return -EINVAL;
+
+	switch (atomizeflg) {
+	case TRANSMUTATION:
+		return transmutation();
+	case DESTROY:
+		return destroy(id);
+	}
+
+	return -EINVAL;
 }
 
 #endif
