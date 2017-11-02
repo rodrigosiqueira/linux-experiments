@@ -320,8 +320,8 @@ static void account_kernel_stack(struct task_struct *tsk, int account)
 		}
 
 		/* All stack pages belong to the same memcg. */
-		memcg_kmem_update_page_stat(vm->pages[0], MEMCG_KERNEL_STACK_KB,
-					    account * (THREAD_SIZE / 1024));
+		mod_memcg_page_state(vm->pages[0], MEMCG_KERNEL_STACK_KB,
+				     account * (THREAD_SIZE / 1024));
 	} else {
 		/*
 		 * All stack pages are in the same zone and belong to the
@@ -332,8 +332,8 @@ static void account_kernel_stack(struct task_struct *tsk, int account)
 		mod_zone_page_state(page_zone(first_page), NR_KERNEL_STACK_KB,
 				    THREAD_SIZE / 1024 * account);
 
-		memcg_kmem_update_page_stat(first_page, MEMCG_KERNEL_STACK_KB,
-					    account * (THREAD_SIZE / 1024));
+		mod_memcg_page_state(first_page, MEMCG_KERNEL_STACK_KB,
+				     account * (THREAD_SIZE / 1024));
 	}
 }
 
@@ -554,7 +554,7 @@ static struct task_struct *dup_task_struct(struct task_struct *orig, int node)
 	set_task_stack_end_magic(tsk);
 
 #ifdef CONFIG_CC_STACKPROTECTOR
-	tsk->stack_canary = get_random_long();
+	tsk->stack_canary = get_random_canary();
 #endif
 
 	/*
@@ -572,6 +572,10 @@ static struct task_struct *dup_task_struct(struct task_struct *orig, int node)
 	account_kernel_stack(tsk, 1);
 
 	kcov_task_init(tsk);
+
+#ifdef CONFIG_FAULT_INJECTION
+	tsk->fail_nth = 0;
+#endif
 
 	return tsk;
 
@@ -781,6 +785,13 @@ static void mm_init_owner(struct mm_struct *mm, struct task_struct *p)
 #endif
 }
 
+static void mm_init_uprobes_state(struct mm_struct *mm)
+{
+#ifdef CONFIG_UPROBES
+	mm->uprobes_state.xol_area = NULL;
+#endif
+}
+
 static struct mm_struct *mm_init(struct mm_struct *mm, struct task_struct *p,
 	struct user_namespace *user_ns)
 {
@@ -804,10 +815,11 @@ static struct mm_struct *mm_init(struct mm_struct *mm, struct task_struct *p,
 	mm_init_owner(mm, p);
 	RCU_INIT_POINTER(mm->exe_file, NULL);
 	mmu_notifier_mm_init(mm);
-	clear_tlb_flush_pending(mm);
+	init_tlb_flush_pending(mm);
 #if defined(CONFIG_TRANSPARENT_HUGEPAGE) && !USE_SPLIT_PMD_PTLOCKS
 	mm->pmd_huge_pte = NULL;
 #endif
+	mm_init_uprobes_state(mm);
 
 	if (current->mm) {
 		mm->flags = current->mm->flags & MMF_INIT_MASK;
@@ -2132,230 +2144,6 @@ SYSCALL_DEFINE5(clone, unsigned long, clone_flags, unsigned long, newsp,
 {
 	return _do_fork(clone_flags, newsp, 0, parent_tidptr, child_tidptr, tls);
 }
-#endif
-
-#ifdef CONFIG_ATOMIZE
-
-#include <linux/atomize.h>
-#include <linux/sysfs.h>
-
-#define ATOMIZE_MAX_ID INT_MAX
-
-/* Required elements to be use during the atomization processes */
-static struct kmem_cache *particle_cache;
-static struct atom atomizations;
-
-/* Atomize sysfs */
-static struct kset *atomize_kset;
-
-struct atomize_sysfs_attr {
-	struct attribute attr;
-	ssize_t (*show)(struct particle *p, struct atomize_sysfs_attr *a,
-			char *buf);
-	ssize_t (*store)(struct particle *p, struct atomize_sysfs_attr *a,
-			 const char *buf, size_t count);
-};
-
-#define ATOMIZE_ATTR(NAME, MODE, SHOW, STORE)			\
-static struct atomize_sysfs_attr atomize_sysfs_attr_##NAME =	\
-	__ATTR(NAME, MODE, SHOW, STORE)
-
-static ssize_t atomize_sysfs_attr_show(struct kobject *kobj,
-				       struct attribute *attr,
-				       char *buf)
-{
-	struct particle *p = NULL;
-	struct atomize_sysfs_attr *a = NULL;
-
-	p = container_of(kobj, struct particle, kobj);
-	a = container_of(attr, struct atomize_sysfs_attr, attr);
-
-	if (!a->show)
-		return -EIO;
-
-	return a->show(p, a, buf);
-}
-
-static ssize_t atomize_sysfs_attr_store(struct kobject *kobj,
-					struct attribute *attr,
-					const char *buf, size_t count)
-{
-	struct particle *p = NULL;
-	struct atomize_sysfs_attr *a = NULL;
-
-	p = container_of(kobj, struct particle, kobj);
-	a = container_of(attr, struct atomize_sysfs_attr, attr);
-
-	if (!a->store)
-		return -EIO;
-
-	return a->store(p, a, buf, count);
-}
-
-static const struct sysfs_ops atomize_sysfs_ops = {
-	.show = atomize_sysfs_attr_show,
-	.store = atomize_sysfs_attr_store,
-};
-
-static ssize_t show_atomize_pid(struct particle *p,
-				struct atomize_sysfs_attr *a,
-				char *buf)
-{
-	return sprintf(buf, "%d\n", p->composition->pid);
-}
-ATOMIZE_ATTR(pid, 0444, show_atomize_pid, NULL);
-
-static ssize_t show_atomize_id(struct particle *p,
-			       struct atomize_sysfs_attr *a,
-			       char *buf)
-{
-	return sprintf(buf, "%d\n", p->id);
-}
-ATOMIZE_ATTR(id, 0444, show_atomize_id, NULL);
-
-/* Each element in this array was created by ATOMIZE_ATTR */
-static struct attribute *atomize_default_attr[] = {
-	&atomize_sysfs_attr_id.attr,
-	&atomize_sysfs_attr_pid.attr,
-	NULL
-};
-
-static void atomize_release(struct kobject *kobj)
-{
-	struct particle *p = container_of(kobj, struct particle, kobj);
-
-	spin_lock(&atomizations.atomize_lock);
-	idr_remove(&atomizations.particles, p->id);
-	spin_unlock(&atomizations.atomize_lock);
-	// TODO: Do we need RCU stuffs? Something to call call_rcu?
-}
-
-static struct kobj_type atomize_ktype = {
-	.sysfs_ops = &atomize_sysfs_ops,
-	.release = atomize_release,
-	.default_attrs = atomize_default_attr,
-};
-
-static inline struct particle *new_particle(void)
-{
-	return kmem_cache_zalloc(particle_cache, GFP_KERNEL);
-}
-
-static int register_particle_on_sysfs(struct particle *p)
-{
-	int rc = 0;
-
-	p->kobj.kset = atomize_kset;
-
-	/* FIXME: In a near future, I want to add only the PID entry on sys.
-	 * Inside each pid dir, I want a dir per id, and finally the attributes
-	 * per particle
-	 */
-	rc = kobject_init_and_add(&p->kobj, &atomize_ktype, NULL, "%d", p->id);
-	if (rc != 0) {
-		// TODO: We should remove atomize
-		pr_err("Could not add the new atomization in the hierarchy");
-		return rc;
-	}
-	// TODO: Should I trigger an event with kobject_uevent?
-	return 0;
-}
-
-static int __init atomize_sysfs_init(void)
-{
-	atomize_kset = kset_create_and_add("atomize", NULL, kernel_kobj);
-	if (!atomize_kset) {
-		pr_err("Atomize entry on sysfs failed\n");
-		return -ENOMEM;
-	}
-
-	return 0;
-}
-postcore_initcall(atomize_sysfs_init);
-
-static struct particle *particle_lookup(int id)
-{
-	struct particle *p = NULL;
-
-	p = idr_find(&atomizations.particles, id);
-	return p;
-}
-
-void atomize_init(void)
-{
-	particle_cache = KMEM_CACHE(particle, SLAB_PANIC | SLAB_NOTRACK);
-	// TODO: Is it worth to cache atom?
-	idr_init(&atomizations.particles);
-	spin_lock_init(&atomizations.atomize_lock);
-}
-
-int transmutation(void)
-{
-	struct particle *p = NULL;
-	int rc = 0;
-
-	// FIXME: Copy process should be added to a specific function
-	p = new_particle();
-	if (!p)
-		return -ENOMEM;
-
-	p->composition = dup_task_struct(current, NUMA_NO_NODE);
-	if (!p)
-		return -ENOMEM;
-
-	// FIXME: Add to idr and sysfs should be a specific function each
-	spin_lock(&atomizations.atomize_lock);
-	p->id = idr_alloc(&atomizations.particles, p, 1, ATOMIZE_MAX_ID,
-				GFP_KERNEL);
-	spin_unlock(&atomizations.atomize_lock);
-	if (p->id < 0) {
-		//TODO: Should free p
-		pr_err("Could not alloc idr");
-		return rc;
-	}
-
-	// FIXME: If register to sysfs fail, should clean idr and particle
-	rc = register_particle_on_sysfs(p);
-	if (rc < 0)
-		return rc;
-
-	return p->id;
-}
-
-int destroy(int id)
-{
-	struct particle *p = NULL;
-
-	p = particle_lookup(id);
-	if (!p)
-		return -EINVAL;
-
-	free_task(p->composition);
-
-	spin_lock(&atomizations.atomize_lock);
-	idr_remove(&atomizations.particles, p->id);
-	spin_unlock(&atomizations.atomize_lock);
-
-	kobject_put(&p->kobj);
-
-	return 0;
-}
-
-SYSCALL_DEFINE2(atomize, int, atomizeflg, int, id)
-{
-	if (atomizeflg & ~(TRANSMUTATION | DESTROY))
-		return -EINVAL;
-
-	switch (atomizeflg) {
-	case TRANSMUTATION:
-		return transmutation();
-	case DESTROY:
-		return destroy(id);
-	}
-
-	return -EINVAL;
-}
-
 #endif
 
 void walk_process_tree(struct task_struct *top, proc_visitor visitor, void *data)
