@@ -548,9 +548,9 @@ asmlinkage __visible void __init start_kernel(void)
 	sort_main_extable();
 	trap_init();
 	mm_init();
-	#ifdef CONFIG_ATOMIZE
+#ifdef CONFIG_ATOMIZE
 	atomize_init();
-	#endif
+#endif
 
 	ftrace_init();
 

@@ -1571,7 +1571,9 @@ static __latent_entropy struct task_struct *copy_process(
 	p = dup_task_struct(current, node);
 	if (!p)
 		goto fork_out;
-
+#ifdef CONFIG_ATOMIZE
+	p->atomizations.count = NO_ATOMIZATIONS;
+#endif
 	/*
 	 * This _must_ happen before we call free_task(), i.e. before we jump
 	 * to any of the bad_fork_* labels. This is to avoid freeing
@@ -2143,7 +2145,6 @@ SYSCALL_DEFINE5(clone, unsigned long, clone_flags, unsigned long, newsp,
 
 /* Required elements to be use during the atomization processes */
 static struct kmem_cache *particle_cache;
-static struct atom atomizations;
 
 /* Atomize sysfs */
 static struct kset *atomize_kset;
@@ -2197,36 +2198,40 @@ static const struct sysfs_ops atomize_sysfs_ops = {
 	.store = atomize_sysfs_attr_store,
 };
 
-static ssize_t show_atomize_pid(struct particle *p,
+static ssize_t show_atomize_ids(struct particle *p,
 				struct atomize_sysfs_attr *a,
 				char *buf)
 {
-	return sprintf(buf, "%d\n", p->composition->pid);
-}
-ATOMIZE_ATTR(pid, 0444, show_atomize_pid, NULL);
+	struct particle *entry;
+	ssize_t ret = 0;
+	int id = 1;
+	char *sep = "";
 
-static ssize_t show_atomize_id(struct particle *p,
-			       struct atomize_sysfs_attr *a,
-			       char *buf)
-{
-	return sprintf(buf, "%d\n", p->id);
+	idr_for_each_entry(p->parent_idr, entry, id) {
+		ret += scnprintf(buf + ret, PAGE_SIZE - ret, "%s%d", sep, id);
+		sep = ",";
+	}
+
+	ret += scnprintf(buf + ret, PAGE_SIZE - ret, "\n");
+
+	return ret;
 }
-ATOMIZE_ATTR(id, 0444, show_atomize_id, NULL);
+ATOMIZE_ATTR(ids, 0444, show_atomize_ids, NULL);
 
 /* Each element in this array was created by ATOMIZE_ATTR */
 static struct attribute *atomize_default_attr[] = {
-	&atomize_sysfs_attr_id.attr,
-	&atomize_sysfs_attr_pid.attr,
+	&atomize_sysfs_attr_ids.attr,
 	NULL
 };
 
 static void atomize_release(struct kobject *kobj)
 {
+	struct task_struct *c = current;
 	struct particle *p = container_of(kobj, struct particle, kobj);
-
-	spin_lock(&atomizations.atomize_lock);
-	idr_remove(&atomizations.particles, p->id);
-	spin_unlock(&atomizations.atomize_lock);
+pr_info("-- dentro do atomize release --");
+	//spin_lock(&c->atomizations.atomize_lock);
+	//idr_remove(&c->atomizations.particles, p->id);
+	//spin_unlock(&c->atomizations.atomize_lock);
 	// TODO: Do we need RCU stuffs? Something to call call_rcu?
 }
 
@@ -2247,14 +2252,10 @@ static int register_particle_on_sysfs(struct particle *p)
 
 	p->kobj.kset = atomize_kset;
 
-	/* FIXME: In a near future, I want to add only the PID entry on sys.
-	 * Inside each pid dir, I want a dir per id, and finally the attributes
-	 * per particle
-	 */
-	rc = kobject_init_and_add(&p->kobj, &atomize_ktype, NULL, "%d", p->id);
+	rc = kobject_init_and_add(&p->kobj, &atomize_ktype, NULL, "%d",
+				  p->composition->pid);
 	if (rc != 0) {
-		// TODO: We should remove atomize
-		pr_err("Could not add the new atomization in the hierarchy");
+		pr_warning("Couldn't add the new atomization in the hierarchy");
 		return rc;
 	}
 	// TODO: Should I trigger an event with kobject_uevent?
@@ -2276,8 +2277,11 @@ postcore_initcall(atomize_sysfs_init);
 static struct particle *particle_lookup(int id)
 {
 	struct particle *p = NULL;
+	struct task_struct *c = current;
 
-	p = idr_find(&atomizations.particles, id);
+	if (c->atomizations.count > 0 && id > 0)
+		p = idr_find(&c->atomizations.particles, id);
+
 	return p;
 }
 
@@ -2285,60 +2289,121 @@ void atomize_init(void)
 {
 	particle_cache = KMEM_CACHE(particle, SLAB_PANIC | SLAB_NOTRACK);
 	// TODO: Is it worth to cache atom?
-	idr_init(&atomizations.particles);
-	spin_lock_init(&atomizations.atomize_lock);
 }
 
 int transmutation(void)
 {
-	struct particle *p = NULL;
-	int rc = 0;
+	struct particle *p;
+	struct task_struct *c = current;
+	int retval = 0;
 
 	// FIXME: Copy process should be added to a specific function
+	retval = -ENOMEM;
 	p = new_particle();
 	if (!p)
-		return -ENOMEM;
+		goto out_transmutation;
 
-	p->composition = dup_task_struct(current, NUMA_NO_NODE);
+	p->composition = dup_task_struct(c, NUMA_NO_NODE);
 	if (!p)
-		return -ENOMEM;
+		goto out_free_particle;
 
-	// FIXME: Add to idr and sysfs should be a specific function each
-	spin_lock(&atomizations.atomize_lock);
-	p->id = idr_alloc(&atomizations.particles, p, 1, ATOMIZE_MAX_ID,
-				GFP_KERNEL);
-	spin_unlock(&atomizations.atomize_lock);
-	if (p->id < 0) {
-		//TODO: Should free p
-		pr_err("Could not alloc idr");
-		return rc;
+	if (c->atomizations.count == NO_ATOMIZATIONS) {
+		idr_init(&c->atomizations.particles);
+		spin_lock_init(&c->atomizations.atomize_lock);
+		c->atomizations.count = 0;
+		// Sysfs is important, but not crucial for the atomize
+		retval = register_particle_on_sysfs(p);
+		WARN_ON(retval < 0);
 	}
 
-	// FIXME: If register to sysfs fail, should clean idr and particle
-	rc = register_particle_on_sysfs(p);
-	if (rc < 0)
-		return rc;
+	spin_lock(&c->atomizations.atomize_lock);
+	p->id = idr_alloc(&c->atomizations.particles, p, 1, ATOMIZE_MAX_ID,
+			  GFP_KERNEL);
+	spin_unlock(&c->atomizations.atomize_lock);
+	if (p->id < 0) {
+		pr_err("Problem to register new particle on process");
+		goto out_free_task;
+	}
+
+	p->parent_idr = &c->atomizations.particles;
+	c->atomizations.count++;
 
 	return p->id;
+
+out_free_task:
+	free_task_struct(p->composition);
+out_free_particle:
+	kmem_cache_free(particle_cache, p);
+out_transmutation:
+	return retval;
 }
 
 int destroy(int id)
 {
-	struct particle *p = NULL;
+	struct particle *p;
+	struct task_struct *c = current;
+	int retval = -EINVAL;
 
 	p = particle_lookup(id);
-	if (!p)
-		return -EINVAL;
+	if (!p) {
+		pr_warning("destroy (PID %d): Cannot find %d", c->pid, id);
+		goto out_error;
+	}
 
-	free_task(p->composition);
+	//free_task_struct(p->composition);
 
-	spin_lock(&atomizations.atomize_lock);
-	idr_remove(&atomizations.particles, p->id);
-	spin_unlock(&atomizations.atomize_lock);
+	c->atomizations.count--;
+	if (!c->atomizations.count)
+		kobject_put(&p->kobj);
 
-	kobject_put(&p->kobj);
+	spin_lock(&c->atomizations.atomize_lock);
+	if (!idr_remove(&c->atomizations.particles, p->id)) {
+		spin_unlock(&c->atomizations.atomize_lock);
+		pr_warning("destroy (PID %d): idr_remove: %d", c->pid, id);
+		goto out_restore_count;
+	}
+	spin_unlock(&c->atomizations.atomize_lock);
 
+	//kmem_cache_free(particle_cache, p);
 	return 0;
+
+out_restore_count:
+	c->atomizations.count++;
+out_error:
+	return retval;
+}
+
+static int particles_free(int id, void *p, void *data)
+{
+	int ret = 0;
+
+	ret = destroy(id);
+	if (!ret)
+		return 0;
+	else
+		return ret;
+}
+
+// FIXME: Tem algum bug aqui ainda que aparece quando tem multiplos idr
+void clean_atomization(void)
+{
+	struct task_struct *c = current;
+	int retval = 0;
+/*
+	struct particle *entry;
+	ssize_t ret = 0;
+	int id = 1;
+	char *sep = "";
+
+	idr_for_each_entry(p->parent_idr, entry, id) {
+		ret += scnprintf(buf + ret, PAGE_SIZE - ret, "%s%d", sep, id);
+		sep = ",";
+	}
+*/
+pr_info(" -- A porra do clean all tem po pid: %d", c->pid);
+	retval = idr_for_each(&c->atomizations.particles, particles_free, NULL);
+	if (retval)
+		pr_warning("Clean atomization find any issue on cleanup");
 }
 
 SYSCALL_DEFINE2(atomize, int, atomizeflg, int, id)
@@ -2354,6 +2419,17 @@ SYSCALL_DEFINE2(atomize, int, atomizeflg, int, id)
 	}
 
 	return -EINVAL;
+}
+
+SYSCALL_DEFINE1(alternate, int, id)
+{
+	struct particle *p;
+
+	p = particle_lookup(id);
+	if (!p)
+		return -EINVAL;
+
+	return 0;
 }
 
 #endif

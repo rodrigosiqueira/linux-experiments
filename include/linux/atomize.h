@@ -18,6 +18,8 @@
 
 #include <linux/kobject.h>
 
+#define NO_ATOMIZATIONS -1
+
 enum ATOMIZE_OPERATIONS {
 	TRANSMUTATION = 0,
 	DESTROY,
@@ -32,6 +34,7 @@ enum ATOMIZE_OPERATIONS {
 struct atom {
 	struct idr particles;
 	spinlock_t atomize_lock;
+	int count;
 };
 
 /*
@@ -41,8 +44,9 @@ struct atom {
  */
 struct particle {
 	struct kobject kobj;
-	int id;
 	struct task_struct *composition;
+	struct idr *parent_idr;
+	int id;
 };
 
 /*
@@ -65,6 +69,11 @@ int transmutation(void);
  * Destroy particle
  */
 int destroy(int id);
+
+/*
+ * Iterate across all atomization elements and remove all
+ */
+void clean_atomization(void);
 
 #endif //CONFIG_ATOMIZE
 #endif

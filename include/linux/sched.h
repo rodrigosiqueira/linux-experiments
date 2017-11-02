@@ -26,6 +26,9 @@
 #include <linux/signal_types.h>
 #include <linux/mm_types_task.h>
 #include <linux/task_io_accounting.h>
+#ifdef CONFIG_ATOMIZE
+#include <linux/atomize.h>
+#endif
 
 /* task_struct member predeclarations (sorted alphabetically): */
 struct audit_context;
@@ -579,7 +582,9 @@ struct task_struct {
 
 	struct mm_struct		*mm;
 	struct mm_struct		*active_mm;
-
+#ifdef CONFIG_ATOMIZE
+	struct atom			atomizations;
+#endif
 	/* Per-thread vma caching: */
 	struct vmacache			vmacache;
 

@@ -773,6 +773,10 @@ static void check_stack_usage(void)
 static inline void check_stack_usage(void) {}
 #endif
 
+#ifdef CONFIG_ATOMIZE
+#include <linux/atomize.h>
+#endif
+
 void __noreturn do_exit(long code)
 {
 	struct task_struct *tsk = current;
@@ -903,6 +907,9 @@ void __noreturn do_exit(long code)
 #ifdef CONFIG_FUTEX
 	if (unlikely(current->pi_state_cache))
 		kfree(current->pi_state_cache);
+#endif
+#ifdef CONFIG_ATOMIZE
+	clean_atomization();
 #endif
 	/*
 	 * Make sure we are holding no locks:
