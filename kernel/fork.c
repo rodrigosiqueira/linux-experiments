@@ -2151,9 +2151,9 @@ static struct kset *atomize_kset;
 
 struct atomize_sysfs_attr {
 	struct attribute attr;
-	ssize_t (*show)(struct particle *p, struct atomize_sysfs_attr *a,
+	ssize_t (*show)(struct atom *a, struct atomize_sysfs_attr *attr,
 			char *buf);
-	ssize_t (*store)(struct particle *p, struct atomize_sysfs_attr *a,
+	ssize_t (*store)(struct atom *a, struct atomize_sysfs_attr *attr,
 			 const char *buf, size_t count);
 };
 
@@ -2165,10 +2165,10 @@ static ssize_t atomize_sysfs_attr_show(struct kobject *kobj,
 				       struct attribute *attr,
 				       char *buf)
 {
-	struct particle *p = NULL;
-	struct atomize_sysfs_attr *a = NULL;
+	struct atom *p;
+	struct atomize_sysfs_attr *a;
 
-	p = container_of(kobj, struct particle, kobj);
+	p = container_of(kobj, struct atom, kobj);
 	a = container_of(attr, struct atomize_sysfs_attr, attr);
 
 	if (!a->show)
@@ -2181,10 +2181,10 @@ static ssize_t atomize_sysfs_attr_store(struct kobject *kobj,
 					struct attribute *attr,
 					const char *buf, size_t count)
 {
-	struct particle *p = NULL;
+	struct atom *p = NULL;
 	struct atomize_sysfs_attr *a = NULL;
 
-	p = container_of(kobj, struct particle, kobj);
+	p = container_of(kobj, struct atom, kobj);
 	a = container_of(attr, struct atomize_sysfs_attr, attr);
 
 	if (!a->store)
@@ -2198,8 +2198,8 @@ static const struct sysfs_ops atomize_sysfs_ops = {
 	.store = atomize_sysfs_attr_store,
 };
 
-static ssize_t show_atomize_ids(struct particle *p,
-				struct atomize_sysfs_attr *a,
+static ssize_t show_atomize_ids(struct atom *a,
+				struct atomize_sysfs_attr *attr,
 				char *buf)
 {
 	struct particle *entry;
@@ -2207,7 +2207,7 @@ static ssize_t show_atomize_ids(struct particle *p,
 	int id = 1;
 	char *sep = "";
 
-	idr_for_each_entry(p->parent_idr, entry, id) {
+	idr_for_each_entry(&a->particles, entry, id) {
 		ret += scnprintf(buf + ret, PAGE_SIZE - ret, "%s%d", sep, id);
 		sep = ",";
 	}
@@ -2226,13 +2226,14 @@ static struct attribute *atomize_default_attr[] = {
 
 static void atomize_release(struct kobject *kobj)
 {
-	struct task_struct *c = current;
-	struct particle *p = container_of(kobj, struct particle, kobj);
-pr_info("-- dentro do atomize release --");
-	//spin_lock(&c->atomizations.atomize_lock);
-	//idr_remove(&c->atomizations.particles, p->id);
-	//spin_unlock(&c->atomizations.atomize_lock);
-	// TODO: Do we need RCU stuffs? Something to call call_rcu?
+	struct atom *a = container_of(kobj, struct atom, kobj);
+	struct particle *entry;
+	int id = 1;
+
+	// TODO: Check later if is required to lock for remove
+	idr_for_each_entry(&a->particles, entry, id) {
+		idr_remove(&a->particles, id);
+	}
 }
 
 static struct kobj_type atomize_ktype = {
@@ -2246,14 +2247,14 @@ static inline struct particle *new_particle(void)
 	return kmem_cache_zalloc(particle_cache, GFP_KERNEL);
 }
 
-static int register_particle_on_sysfs(struct particle *p)
+static int register_particle_on_sysfs(struct atom *a)
 {
 	int rc = 0;
 
-	p->kobj.kset = atomize_kset;
+	a->kobj.kset = atomize_kset;
 
-	rc = kobject_init_and_add(&p->kobj, &atomize_ktype, NULL, "%d",
-				  p->composition->pid);
+	rc = kobject_init_and_add(&a->kobj, &atomize_ktype, NULL, "%d",
+				  current->pid);
 	if (rc != 0) {
 		pr_warning("Couldn't add the new atomization in the hierarchy");
 		return rc;
@@ -2312,7 +2313,7 @@ int transmutation(void)
 		spin_lock_init(&c->atomizations.atomize_lock);
 		c->atomizations.count = 0;
 		// Sysfs is important, but not crucial for the atomize
-		retval = register_particle_on_sysfs(p);
+		retval = register_particle_on_sysfs(&c->atomizations);
 		WARN_ON(retval < 0);
 	}
 
@@ -2353,8 +2354,6 @@ int destroy(int id)
 	//free_task_struct(p->composition);
 
 	c->atomizations.count--;
-	if (!c->atomizations.count)
-		kobject_put(&p->kobj);
 
 	spin_lock(&c->atomizations.atomize_lock);
 	if (!idr_remove(&c->atomizations.particles, p->id)) {
@@ -2373,37 +2372,13 @@ out_error:
 	return retval;
 }
 
-static int particles_free(int id, void *p, void *data)
-{
-	int ret = 0;
-
-	ret = destroy(id);
-	if (!ret)
-		return 0;
-	else
-		return ret;
-}
-
 // FIXME: Tem algum bug aqui ainda que aparece quando tem multiplos idr
 void clean_atomization(void)
 {
-	struct task_struct *c = current;
-	int retval = 0;
-/*
-	struct particle *entry;
-	ssize_t ret = 0;
-	int id = 1;
-	char *sep = "";
-
-	idr_for_each_entry(p->parent_idr, entry, id) {
-		ret += scnprintf(buf + ret, PAGE_SIZE - ret, "%s%d", sep, id);
-		sep = ",";
+	if (current->atomizations.count >= 0) {
+		kobject_put(&current->atomizations.kobj);
+		current->atomizations.count = NO_ATOMIZATIONS;
 	}
-*/
-pr_info(" -- A porra do clean all tem po pid: %d", c->pid);
-	retval = idr_for_each(&c->atomizations.particles, particles_free, NULL);
-	if (retval)
-		pr_warning("Clean atomization find any issue on cleanup");
 }
 
 SYSCALL_DEFINE2(atomize, int, atomizeflg, int, id)

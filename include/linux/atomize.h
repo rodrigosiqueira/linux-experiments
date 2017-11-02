@@ -32,6 +32,7 @@ enum ATOMIZE_OPERATIONS {
  * @atomize_lock Lock to access control for add and remove idr
  */
 struct atom {
+	struct kobject kobj;
 	struct idr particles;
 	spinlock_t atomize_lock;
 	int count;
@@ -43,7 +44,6 @@ struct atom {
  *		process too
  */
 struct particle {
-	struct kobject kobj;
 	struct task_struct *composition;
 	struct idr *parent_idr;
 	int id;
