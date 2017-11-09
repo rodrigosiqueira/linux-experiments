@@ -2141,6 +2141,9 @@ SYSCALL_DEFINE5(clone, unsigned long, clone_flags, unsigned long, newsp,
 #include <linux/atomize.h>
 #include <linux/sysfs.h>
 
+#include <linux/mmu_context.h>
+#include <linux/sched/mm.h>
+
 #define ATOMIZE_MAX_ID INT_MAX
 
 /* Required elements to be use during the atomization processes */
@@ -2305,7 +2308,7 @@ int transmutation(void)
 		goto out_transmutation;
 
 	p->composition = dup_task_struct(c, NUMA_NO_NODE);
-	if (!p)
+	if (!p->composition)
 		goto out_free_particle;
 
 	if (c->atomizations.count == NO_ATOMIZATIONS) {
@@ -2372,13 +2375,43 @@ out_error:
 	return retval;
 }
 
-// FIXME: Tem algum bug aqui ainda que aparece quando tem multiplos idr
 void clean_atomization(void)
 {
 	if (current->atomizations.count >= 0) {
 		kobject_put(&current->atomizations.kobj);
 		current->atomizations.count = NO_ATOMIZATIONS;
 	}
+}
+
+void alternate_elements(struct task_struct *prev, struct task_struct *next)
+{
+	struct mm_struct *mm, *oldmm;
+	//int cpu = smp_processor_id();
+	//struct rq *rq = cpu_rq(cpu);
+
+	// TODO: PRECISO REALMENTE LEVAR EM CONTA O ESCALONADOR?
+	//prepare_task_switch(rq, prev, next);
+	mm = next->mm;
+	oldmm = prev->active_mm;
+
+	if (!mm) {
+		next->active_mm = oldmm;
+		mmgrab(oldmm);
+		enter_lazy_tlb(oldmm, next);
+	} else
+		switch_mm_irqs_off(oldmm, mm, next);
+
+	if (!prev->mm) {
+		prev->active_mm = NULL;
+		//rq->prev_mm = oldmm;
+	}
+
+	//rq->clock_update_flags &= ~(RQCF_ACT_SKIP|RQCF_REQ_SKIP);
+	//rq_unpin_lock(rq, rf);
+	//spin_release(&rq->lock.dep_map, 1, _THIS_IP_);
+
+	switch_to(prev, next, prev);
+	barrier();
 }
 
 SYSCALL_DEFINE2(atomize, int, atomizeflg, int, id)
