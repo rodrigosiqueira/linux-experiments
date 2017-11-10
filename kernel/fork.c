@@ -1571,9 +1571,7 @@ static __latent_entropy struct task_struct *copy_process(
 	p = dup_task_struct(current, node);
 	if (!p)
 		goto fork_out;
-#ifdef CONFIG_ATOMIZE
-	p->atomizations.count = NO_ATOMIZATIONS;
-#endif
+
 	/*
 	 * This _must_ happen before we call free_task(), i.e. before we jump
 	 * to any of the bad_fork_* labels. This is to avoid freeing
@@ -1628,6 +1626,7 @@ static __latent_entropy struct task_struct *copy_process(
 	init_sigpending(&p->pending);
 
 	p->utime = p->stime = p->gtime = 0;
+
 #ifdef CONFIG_ARCH_HAS_SCALED_CPUTIME
 	p->utimescaled = p->stimescaled = 0;
 #endif
@@ -1699,12 +1698,20 @@ static __latent_entropy struct task_struct *copy_process(
 	p->sequential_io	= 0;
 	p->sequential_io_avg	= 0;
 #endif
+#ifdef CONFIG_ATOMIZE
+	p->atomizations.count = NO_ATOMIZATIONS;
+#endif
 
 	/* Perform scheduler related setup. Assign this task to a CPU. */
-	retval = sched_fork(clone_flags, p);
-	if (retval)
-		goto bad_fork_cleanup_policy;
-
+#ifdef CONFIG_ATOMIZE
+	if (!(clone_flags & CLONE_ATOMIZE)) {
+#endif
+		retval = sched_fork(clone_flags, p);
+		if (retval)
+			goto bad_fork_cleanup_policy;
+#ifdef CONFIG_ATOMIZE
+	}
+#endif
 	retval = perf_event_init_task(p);
 	if (retval)
 		goto bad_fork_cleanup_policy;
@@ -1743,7 +1750,7 @@ static __latent_entropy struct task_struct *copy_process(
 	retval = copy_thread_tls(clone_flags, stack_start, stack_size, p, tls);
 	if (retval)
 		goto bad_fork_cleanup_io;
-
+// TODO: PRESTE ATENÇÃO AQUI, O PID NOVO É GERADO NESSE PONTO! No alloc_pid
 	if (pid != &init_struct_pid) {
 		pid = alloc_pid(p->nsproxy->pid_ns_for_children);
 		if (IS_ERR(pid)) {
@@ -1781,6 +1788,7 @@ static __latent_entropy struct task_struct *copy_process(
 	clear_all_latency_tracing(p);
 
 	/* ok, now we should be set up.. */
+// TODO: OLHE O PID AQUI!
 	p->pid = pid_nr(pid);
 	if (clone_flags & CLONE_THREAD) {
 		p->exit_signal = -1;
@@ -1825,6 +1833,7 @@ static __latent_entropy struct task_struct *copy_process(
 		p->real_parent = current->real_parent;
 		p->parent_exec_id = current->parent_exec_id;
 	} else {
+// TODO: O PAI REAL SERIO O MESMO NO CASO DO ATOMIZE
 		p->real_parent = current;
 		p->parent_exec_id = current->self_exec_id;
 	}
@@ -1896,7 +1905,7 @@ static __latent_entropy struct task_struct *copy_process(
 		attach_pid(p, PIDTYPE_PID);
 		nr_threads++;
 	}
-
+//TODO: TEORICAMENTE O ATOMIZE NÃO É UM FORK
 	total_forks++;
 	spin_unlock(&current->sighand->siglock);
 	syscall_tracepoint_update(p);
@@ -2146,6 +2155,8 @@ SYSCALL_DEFINE5(clone, unsigned long, clone_flags, unsigned long, newsp,
 
 #define ATOMIZE_MAX_ID INT_MAX
 
+static struct particle *INVALID_PARTICLE;
+
 /* Required elements to be use during the atomization processes */
 static struct kmem_cache *particle_cache;
 
@@ -2292,6 +2303,9 @@ static struct particle *particle_lookup(int id)
 void atomize_init(void)
 {
 	particle_cache = KMEM_CACHE(particle, SLAB_PANIC | SLAB_NOTRACK);
+	if (!particle_cache)
+		pr_info("+++ problem on KMEM_CACHE ALLOC");
+	INVALID_PARTICLE = new_particle();
 	// TODO: Is it worth to cache atom?
 }
 
@@ -2300,16 +2314,18 @@ int transmutation(void)
 	struct particle *p;
 	struct task_struct *c = current;
 	int retval = 0;
-
 	// FIXME: Copy process should be added to a specific function
 	retval = -ENOMEM;
 	p = new_particle();
 	if (!p)
 		goto out_transmutation;
 
-	p->composition = dup_task_struct(c, NUMA_NO_NODE);
-	if (!p->composition)
+	p->composition = copy_process(CLONE_ATOMIZE | SIGCHLD, 0, 0, NULL, NULL,
+				      0, 0, NUMA_NO_NODE);
+	if (IS_ERR(p->composition)) {
+		retval = PTR_ERR(p->composition);
 		goto out_free_particle;
+	}
 
 	if (c->atomizations.count == NO_ATOMIZATIONS) {
 		idr_init(&c->atomizations.particles);
@@ -2335,10 +2351,13 @@ int transmutation(void)
 	return p->id;
 
 out_free_task:
+	pr_info("transmutation: free_task");
 	free_task_struct(p->composition);
 out_free_particle:
+	pr_info("transmutation: free_particle");
 	kmem_cache_free(particle_cache, p);
 out_transmutation:
+	pr_info("just out");
 	return retval;
 }
 
@@ -2398,19 +2417,25 @@ void alternate_elements(struct task_struct *prev, struct task_struct *next)
 		next->active_mm = oldmm;
 		mmgrab(oldmm);
 		enter_lazy_tlb(oldmm, next);
-	} else
+	} else {
+pr_info("++ ante do switch");
 		switch_mm_irqs_off(oldmm, mm, next);
-
+pr_info("++ depois do switch");
+	}
+pr_info("++--+++");
+return;
 	if (!prev->mm) {
 		prev->active_mm = NULL;
 		//rq->prev_mm = oldmm;
+pr_info("++++ prev->mm");
 	}
-
 	//rq->clock_update_flags &= ~(RQCF_ACT_SKIP|RQCF_REQ_SKIP);
 	//rq_unpin_lock(rq, rf);
 	//spin_release(&rq->lock.dep_map, 1, _THIS_IP_);
 
+pr_info("-- switch_to");
 	switch_to(prev, next, prev);
+pr_info("-- depois switch_to");
 	barrier();
 }
 
@@ -2436,6 +2461,11 @@ SYSCALL_DEFINE1(alternate, int, id)
 	p = particle_lookup(id);
 	if (!p)
 		return -EINVAL;
+
+	if (IS_ERR(p->composition))
+		return PTR_ERR(p->composition);
+
+	alternate_elements(current, p->composition);
 
 	return 0;
 }
