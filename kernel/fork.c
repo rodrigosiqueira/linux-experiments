@@ -1700,18 +1700,13 @@ static __latent_entropy struct task_struct *copy_process(
 #endif
 #ifdef CONFIG_ATOMIZE
 	p->atomizations.count = NO_ATOMIZATIONS;
+	p->main_image = 1;
 #endif
 
 	/* Perform scheduler related setup. Assign this task to a CPU. */
-#ifdef CONFIG_ATOMIZE
-	if (!(clone_flags & CLONE_ATOMIZE)) {
-#endif
-		retval = sched_fork(clone_flags, p);
-		if (retval)
-			goto bad_fork_cleanup_policy;
-#ifdef CONFIG_ATOMIZE
-	}
-#endif
+	retval = sched_fork(clone_flags, p);
+	if (retval)
+		goto bad_fork_cleanup_policy;
 	retval = perf_event_init_task(p);
 	if (retval)
 		goto bad_fork_cleanup_policy;
@@ -1750,7 +1745,7 @@ static __latent_entropy struct task_struct *copy_process(
 	retval = copy_thread_tls(clone_flags, stack_start, stack_size, p, tls);
 	if (retval)
 		goto bad_fork_cleanup_io;
-// TODO: PRESTE ATENÇÃO AQUI, O PID NOVO É GERADO NESSE PONTO! No alloc_pid
+
 	if (pid != &init_struct_pid) {
 		pid = alloc_pid(p->nsproxy->pid_ns_for_children);
 		if (IS_ERR(pid)) {
@@ -1788,7 +1783,7 @@ static __latent_entropy struct task_struct *copy_process(
 	clear_all_latency_tracing(p);
 
 	/* ok, now we should be set up.. */
-// TODO: OLHE O PID AQUI!
+
 	p->pid = pid_nr(pid);
 	if (clone_flags & CLONE_THREAD) {
 		p->exit_signal = -1;
@@ -1833,7 +1828,6 @@ static __latent_entropy struct task_struct *copy_process(
 		p->real_parent = current->real_parent;
 		p->parent_exec_id = current->parent_exec_id;
 	} else {
-// TODO: O PAI REAL SERIO O MESMO NO CASO DO ATOMIZE
 		p->real_parent = current;
 		p->parent_exec_id = current->self_exec_id;
 	}
@@ -1905,7 +1899,7 @@ static __latent_entropy struct task_struct *copy_process(
 		attach_pid(p, PIDTYPE_PID);
 		nr_threads++;
 	}
-//TODO: TEORICAMENTE O ATOMIZE NÃO É UM FORK
+
 	total_forks++;
 	spin_unlock(&current->sighand->siglock);
 	syscall_tracepoint_update(p);
@@ -2152,6 +2146,7 @@ SYSCALL_DEFINE5(clone, unsigned long, clone_flags, unsigned long, newsp,
 
 #include <linux/mmu_context.h>
 #include <linux/sched/mm.h>
+//#include <asm/system.h>
 
 #define ATOMIZE_MAX_ID INT_MAX
 
@@ -2309,19 +2304,135 @@ void atomize_init(void)
 	// TODO: Is it worth to cache atom?
 }
 
+static struct task_struct *snapshot(unsigned long clone_flags,
+				    unsigned long stack_start,
+				    unsigned long stack_size,
+				    unsigned long tls)
+{
+	int retval;
+	struct task_struct *p;
+
+	p = dup_task_struct(current, NUMA_NO_NODE);
+	if (IS_ERR(p)) {
+		retval = PTR_ERR(p);
+		goto snapshot_out;
+	}
+
+	p->main_image = 0;
+
+	retval = perf_event_init_task(p);
+	if (retval)
+		goto bad_snapshot_cleanup_policy;
+	retval = audit_alloc(p);
+	if (retval)
+		goto bad_snapshot_cleanup_perf;
+
+	/* copy all the process information */
+	shm_init_task(p);
+	retval = security_task_alloc(p, clone_flags);
+	if (retval)
+		goto bad_snapshot_cleanup_audit;
+	retval = copy_semundo(clone_flags, p);
+	if (retval)
+		goto bad_snapshot_cleanup_security;
+	retval = copy_files(clone_flags, p);
+	if (retval)
+		goto bad_snapshot_cleanup_semundo;
+	retval = copy_fs(clone_flags, p);
+	if (retval)
+		goto bad_snapshot_cleanup_files;
+	retval = copy_sighand(clone_flags, p);
+	if (retval)
+		goto bad_snapshot_cleanup_fs;
+	retval = copy_signal(clone_flags, p);
+	if (retval)
+		goto bad_snapshot_cleanup_sighand;
+	retval = copy_mm(clone_flags, p);
+	if (retval)
+		goto bad_snapshot_cleanup_signal;
+	retval = copy_namespaces(clone_flags, p);
+	if (retval)
+		goto bad_snapshot_cleanup_mm;
+	retval = copy_io(clone_flags, p);
+	if (retval)
+		goto bad_snapshot_cleanup_namespaces;
+	retval = copy_thread_tls(clone_flags, stack_start, stack_size, p, tls);
+	if (retval)
+		goto bad_snapshot_cleanup_io;
+
+	return p;
+
+bad_snapshot_cleanup_io:
+pr_info("snap 1");
+	if (p->io_context)
+		exit_io_context(p);
+bad_snapshot_cleanup_namespaces:
+pr_info("snap 2");
+	exit_task_namespaces(p);
+bad_snapshot_cleanup_mm:
+pr_info("snap 3");
+	if (p->mm)
+		mmput(p->mm);
+bad_snapshot_cleanup_signal:
+pr_info("snap 4");
+	if (!(clone_flags & CLONE_THREAD))
+		free_signal_struct(p->signal);
+bad_snapshot_cleanup_sighand:
+pr_info("snap 5");
+	__cleanup_sighand(p->sighand);
+bad_snapshot_cleanup_fs:
+pr_info("snap 6");
+	exit_fs(p); /* blocking */
+bad_snapshot_cleanup_files:
+pr_info("snap 7");
+	exit_files(p); /* blocking */
+bad_snapshot_cleanup_semundo:
+pr_info("snap 8");
+	exit_sem(p);
+bad_snapshot_cleanup_security:
+pr_info("snap 9");
+	security_task_free(p);
+bad_snapshot_cleanup_audit:
+pr_info("snap 10");
+	audit_free(p);
+bad_snapshot_cleanup_perf:
+pr_info("snap 11");
+	perf_event_free_task(p);
+bad_snapshot_cleanup_policy:
+pr_info("snap 12");
+#ifdef CONFIG_NUMA
+	mpol_put(p->mempolicy);
+#endif
+	delayacct_tsk_free(p);
+snapshot_out:
+pr_info("snap 13");
+	return ERR_PTR(retval);
+}
+
+//p->composition = dup_task_struct(c, NUMA_NO_NODE);
+//p->composition = copy_process(CLONE_ATOMIZE | SIGCHLD, 0, 0, NULL, NULL,
+//			      0, 0, NUMA_NO_NODE);
 int transmutation(void)
 {
 	struct particle *p;
 	struct task_struct *c = current;
 	int retval = 0;
-	// FIXME: Copy process should be added to a specific function
+
+	// Avoid loop
+	if (!c->main_image) {
+		pr_info("NAOOO NOVOOO: transmutation");
+		return 0;
+	} else {
+		pr_info("NOVO: transmutation");
+	}
+
 	retval = -ENOMEM;
 	p = new_particle();
 	if (!p)
 		goto out_transmutation;
 
-	p->composition = copy_process(CLONE_ATOMIZE | SIGCHLD, 0, 0, NULL, NULL,
-				      0, 0, NUMA_NO_NODE);
+	p->composition = snapshot(SIGCHLD, 0, 0, 0);
+
 	if (IS_ERR(p->composition)) {
 		retval = PTR_ERR(p->composition);
 		goto out_free_particle;
@@ -2347,7 +2458,6 @@ int transmutation(void)
 
 	p->parent_idr = &c->atomizations.particles;
 	c->atomizations.count++;
-
 	return p->id;
 
 out_free_task:
@@ -2376,8 +2486,7 @@ int destroy(int id)
 	//free_task_struct(p->composition);
 
 	c->atomizations.count--;
-
-	spin_lock(&c->atomizations.atomize_lock);
+spin_lock(&c->atomizations.atomize_lock);
 	if (!idr_remove(&c->atomizations.particles, p->id)) {
 		spin_unlock(&c->atomizations.atomize_lock);
 		pr_warning("destroy (PID %d): idr_remove: %d", c->pid, id);
@@ -2401,44 +2510,172 @@ void clean_atomization(void)
 		current->atomizations.count = NO_ATOMIZATIONS;
 	}
 }
+// OPÇÃO 2: Fazer o context switch
+#include "sched/sched.h"
+#include <linux/kprobes.h>
 
-void alternate_elements(struct task_struct *prev, struct task_struct *next)
+static struct rq *finish_task_switch(struct task_struct *prev)
+	__releases(rq->lock)
+{
+	struct rq *rq = this_rq();
+	struct mm_struct *mm = rq->prev_mm;
+	long prev_state;
+
+	/*
+	 * The previous task will have left us with a preempt_count of 2
+	 * because it left us after:
+	 *
+	 *	schedule()
+	 *	  preempt_disable();			// 1
+	 *	  __schedule()
+	 *	    raw_spin_lock_irq(&rq->lock)	// 2
+	 *
+	 * Also, see FORK_PREEMPT_COUNT.
+	 */
+	if (WARN_ONCE(preempt_count() != 2*PREEMPT_DISABLE_OFFSET,
+		      "corrupted preempt_count: %s/%d/0x%x\n",
+		      current->comm, current->pid, preempt_count()))
+		preempt_count_set(FORK_PREEMPT_COUNT);
+
+	rq->prev_mm = NULL;
+
+	/*
+	 * A task struct has one reference for the use as "current".
+	 * If a task dies, then it sets TASK_DEAD in tsk->state and calls
+	 * schedule one last time. The schedule call will never return, and
+	 * the scheduled task must drop that reference.
+	 *
+	 * We must observe prev->state before clearing prev->on_cpu (in
+	 * finish_lock_switch), otherwise a concurrent wakeup can get prev
+	 * running on another CPU and we could rave with its RUNNING -> DEAD
+	 * transition, resulting in a double drop.
+	 */
+	prev_state = prev->state;
+	vtime_task_switch(prev);
+	perf_event_task_sched_in(prev, current);
+	finish_lock_switch(rq, prev);
+	finish_arch_post_lock_switch();
+
+	//fire_sched_in_preempt_notifiers(current);
+	if (mm)
+		mmdrop(mm);
+	if (unlikely(prev_state == TASK_DEAD)) {
+		if (prev->sched_class->task_dead)
+			prev->sched_class->task_dead(prev);
+
+		/*
+		 * Remove function-return probe instances associated with this
+		 * task and put them back on the free list.
+		 */
+		kprobe_flush_task(prev);
+
+		/* Task is done with its stack. */
+		put_task_stack(prev);
+
+		put_task_struct(prev);
+	}
+
+	tick_nohz_task_switch();
+	return rq;
+}
+
+
+static void context_switch_2(struct rq *rq, struct task_struct *prev,
+			     struct task_struct *next, struct rq_flags *rf)
 {
 	struct mm_struct *mm, *oldmm;
-	//int cpu = smp_processor_id();
-	//struct rq *rq = cpu_rq(cpu);
 
-	// TODO: PRECISO REALMENTE LEVAR EM CONTA O ESCALONADOR?
-	//prepare_task_switch(rq, prev, next);
+pr_info("context_switch 2: lock");
+	sched_info_switch(rq, prev, next);
+	perf_event_task_sched_out(prev, next);
+	//fire_sched_out_preempt_notifiers(prev, next);
+	prepare_lock_switch(rq, next);
+	prepare_arch_switch(next);
+
+
 	mm = next->mm;
 	oldmm = prev->active_mm;
+	/*
+	 * For paravirt, this is coupled with an exit in switch_to to
+	 * combine the page table reload and the switch backend into
+	 * one hypercall.
+	 */
+	arch_start_context_switch(prev);
 
 	if (!mm) {
+pr_info("context_switch 2: TROCA MM");
 		next->active_mm = oldmm;
 		mmgrab(oldmm);
 		enter_lazy_tlb(oldmm, next);
 	} else {
-pr_info("++ ante do switch");
+pr_info("context_switch 2: TROCA MM IRQS");
 		switch_mm_irqs_off(oldmm, mm, next);
-pr_info("++ depois do switch");
 	}
-pr_info("++--+++");
-return;
+
 	if (!prev->mm) {
 		prev->active_mm = NULL;
-		//rq->prev_mm = oldmm;
-pr_info("++++ prev->mm");
+		rq->prev_mm = oldmm;
 	}
-	//rq->clock_update_flags &= ~(RQCF_ACT_SKIP|RQCF_REQ_SKIP);
-	//rq_unpin_lock(rq, rf);
-	//spin_release(&rq->lock.dep_map, 1, _THIS_IP_);
+pr_info("context_switch 2: CLOCK E A PORRA TODA");
+	rq->clock_update_flags &= ~(RQCF_ACT_SKIP|RQCF_REQ_SKIP);
 
-pr_info("-- switch_to");
+	/*
+	 * Since the runqueue lock will be released by the next
+	 * task (which is an invalid locking op but in the case
+	 * of the scheduler it's an obvious special-case), so we
+	 * do an early lockdep release here:
+	 */
+	rq_unpin_lock(rq, rf);
+pr_info("context_switch 2: depois de rq_unpin");
+	spin_release(&rq->lock.dep_map, 1, _THIS_IP_);
+pr_info("context_switch 2: depois de spin_release");
+
+	/* Here we just switch the register state and the stack. */
 	switch_to(prev, next, prev);
-pr_info("-- depois switch_to");
+pr_info("context_switch 2: depois de switch_to");
 	barrier();
+
+pr_info("finish");
+	rq = finish_task_switch(prev);
+pr_info("finish: %p", rq);
 }
 
+int alternate_elements(struct task_struct *prev, struct task_struct *next)
+{
+	int cpu;
+	struct rq *rq;
+	struct rq_flags rf;
+
+	cpu = smp_processor_id();
+	rq = cpu_rq(cpu);
+pr_info("alternate: cpu %d", cpu);
+	rq_lock(rq, &rf);
+pr_info("alternate: lock");
+	context_switch_2(rq, prev, next, &rf);
+pr_info("After switch");
+
+	return 0;
+}
+
+// OPÇÃO 1: Tentar atualizar o task_struct salvo no runqueue
+/*
+ * int alternate_elements(struct task_struct *prev, struct task_struct *next)
+ * {
+ * 	int cpu;
+ * 	struct rq *rq;
+ * 	struct mm_struct *mm, *oldmm;
+ * 	struct rq_flags rf;
+ * 
+ * 	cpu = smp_processor_id();
+ * 	rq = cpu_rq(cpu);
+ * 
+ * 	rq_lock(rq, &rf);
+ * 	rq->curr = next;
+ * 	rq_unpin_lock(rq, &rf);
+ * 
+ * 	return 0;
+ * }
+ */
 SYSCALL_DEFINE2(atomize, int, atomizeflg, int, id)
 {
 	if (atomizeflg & ~(TRANSMUTATION | DESTROY))
@@ -2465,9 +2702,7 @@ SYSCALL_DEFINE1(alternate, int, id)
 	if (IS_ERR(p->composition))
 		return PTR_ERR(p->composition);
 
-	alternate_elements(current, p->composition);
-
-	return 0;
+	return alternate_elements(current, p->composition);
 }
 
 #endif

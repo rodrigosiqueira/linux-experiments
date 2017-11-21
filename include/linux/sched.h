@@ -584,6 +584,7 @@ struct task_struct {
 	struct mm_struct		*active_mm;
 #ifdef CONFIG_ATOMIZE
 	struct atom			atomizations;
+	int				main_image;
 #endif
 	/* Per-thread vma caching: */
 	struct vmacache			vmacache;

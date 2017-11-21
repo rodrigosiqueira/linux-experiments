@@ -71,6 +71,13 @@ int transmutation(void);
 int destroy(int id);
 
 /*
+ * Function responsible for alternate between task
+ *
+ * @return Return 0 on success, otherwise a negative number
+ */
+int alternate_elements(struct task_struct *prev, struct task_struct *next);
+
+/*
  * Iterate across all atomization elements and remove all
  */
 void clean_atomization(void);
