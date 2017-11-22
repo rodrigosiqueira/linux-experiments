@@ -2585,12 +2585,18 @@ static void context_switch_2(struct rq *rq, struct task_struct *prev,
 {
 	struct mm_struct *mm, *oldmm;
 
-pr_info("context_switch 2: lock");
-	sched_info_switch(rq, prev, next);
+pr_info("context_switch 2: ROTINAS DE LOCK");
+	// Chamado para registrar algumas informações, tenho a impressão de
+	// que isso não é necessário aqui
+	//sched_info_switch(rq, prev, next);
+pr_info("context_switch 2: 1");
 	perf_event_task_sched_out(prev, next);
+pr_info("context_switch 2: 2");
 	//fire_sched_out_preempt_notifiers(prev, next);
 	prepare_lock_switch(rq, next);
+pr_info("context_switch 2: 3");
 	prepare_arch_switch(next);
+pr_info("context_switch 2: 4");
 
 
 	mm = next->mm;
@@ -2616,8 +2622,8 @@ pr_info("context_switch 2: TROCA MM IRQS");
 		prev->active_mm = NULL;
 		rq->prev_mm = oldmm;
 	}
-pr_info("context_switch 2: CLOCK E A PORRA TODA");
-	rq->clock_update_flags &= ~(RQCF_ACT_SKIP|RQCF_REQ_SKIP);
+pr_info("context_switch 2: MANDEI O FODA-SE PARA AS FLAGS");
+	//rq->clock_update_flags &= ~(RQCF_ACT_SKIP|RQCF_REQ_SKIP);
 
 	/*
 	 * Since the runqueue lock will be released by the next
@@ -2625,16 +2631,17 @@ pr_info("context_switch 2: CLOCK E A PORRA TODA");
 	 * of the scheduler it's an obvious special-case), so we
 	 * do an early lockdep release here:
 	 */
+pr_info("context_switch 2: depois de barrier");
 	rq_unpin_lock(rq, rf);
 pr_info("context_switch 2: depois de rq_unpin");
 	spin_release(&rq->lock.dep_map, 1, _THIS_IP_);
-pr_info("context_switch 2: depois de spin_release");
-
+pr_info("TENTATIVA DE ASSAULTO A MAO ARMADA!!!");
+prev->thread = next->thread;
 	/* Here we just switch the register state and the stack. */
-	switch_to(prev, next, prev);
+	//switch_to(prev, next, prev);
+	switch_to(prev, prev, prev);
 pr_info("context_switch 2: depois de switch_to");
 	barrier();
-
 pr_info("finish");
 	rq = finish_task_switch(prev);
 pr_info("finish: %p", rq);
@@ -2651,7 +2658,7 @@ int alternate_elements(struct task_struct *prev, struct task_struct *next)
 pr_info("alternate: cpu %d", cpu);
 	rq_lock(rq, &rf);
 pr_info("alternate: lock");
-	context_switch_2(rq, prev, next, &rf);
+	context_switch_2(rq, prev, prev, &rf);
 pr_info("After switch");
 
 	return 0;
