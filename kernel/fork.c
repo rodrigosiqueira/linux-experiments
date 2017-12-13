@@ -2493,11 +2493,18 @@ static struct task_struct *snapshot(unsigned long clone_flags,
 	p->sequential_io_avg	= 0;
 #endif
 
-	/* Perform scheduler related setup. Assign this task to a CPU.
-	retval = sched_fork(clone_flags, p);
-	if (retval)
-		goto bad_fork_cleanup_policy_2;
+	// Perform scheduler related setup. Assign this task to a CPU.
+	//retval = sched_fork(clone_flags, p);
+	//if (retval)
+	//	goto bad_fork_cleanup_policy_2;
+
+	//NA TEORIA, O SNAPSHOT NÃO PRECISA DE TODAS AS CONFIGURAÇÕES DO SCHED
+	//**** MODIFICAÇÕES PARCIAIS ****
+	/*
+	 * Make sure we do not leak PI boosting priority to the child.
 	 */
+	p->prio = current->normal_prio;
+	//**** MODIFICAÇÕES PARCIAIS ****
 	retval = perf_event_init_task(p);
 	if (retval)
 		goto bad_fork_cleanup_policy_2;
@@ -2756,136 +2763,6 @@ fork_out_2:
 
 }
 
-/*  OLD
-static struct task_struct *snapshot(unsigned long clone_flags,
-				    unsigned long stack_start,
-				    unsigned long stack_size,
-				    unsigned long tls)
-{
-	int retval;
-	struct task_struct *p;
-
-	p = dup_task_struct(current, NUMA_NO_NODE);
-	if (IS_ERR(p)) {
-		retval = PTR_ERR(p);
-		goto snapshot_out;
-	}
-
-	p->main_image = 0;
-
-	retval = copy_creds(p, clone_flags);
-	if (retval < 0)
-		goto bad_snapshot_cleanup_free;
-
-	delayacct_tsk_init(p);
-	p->flags |= PF_FORKNOEXEC;
-
-#ifdef CONFIG_NUMA
-	p->mempolicy = mpol_dup(p->mempolicy);
-	if (IS_ERR(p->mempolicy)) {
-		retval = PTR_ERR(p->mempolicy);
-		p->mempolicy = NULL;
-		goto bad_snapshot_cleanup_threadgroup_lock;
-	}
-#endif
-
-
-	retval = perf_event_init_task(p);
-	if (retval)
-		goto bad_snapshot_cleanup_policy;
-
-	retval = audit_alloc(p);
-	if (retval)
-		goto bad_snapshot_cleanup_perf;
-
-	// copy all the process information
-	shm_init_task(p);
-	retval = security_task_alloc(p, clone_flags);
-	if (retval)
-		goto bad_snapshot_cleanup_audit;
-	retval = copy_semundo(clone_flags, p);
-	if (retval)
-		goto bad_snapshot_cleanup_security;
-	retval = copy_files(clone_flags, p);
-	if (retval)
-		goto bad_snapshot_cleanup_semundo;
-	retval = copy_fs(clone_flags, p);
-	if (retval)
-		goto bad_snapshot_cleanup_files;
-	retval = copy_sighand(clone_flags, p);
-	if (retval)
-		goto bad_snapshot_cleanup_fs;
-	retval = copy_signal(clone_flags, p);
-	if (retval)
-		goto bad_snapshot_cleanup_sighand;
-	retval = copy_mm(clone_flags, p);
-	if (retval)
-		goto bad_snapshot_cleanup_signal;
-	retval = copy_namespaces(clone_flags, p);
-	if (retval)
-		goto bad_snapshot_cleanup_mm;
-	retval = copy_io(clone_flags, p);
-	if (retval)
-		goto bad_snapshot_cleanup_namespaces;
-	retval = copy_thread_tls(clone_flags, stack_start, stack_size, p, tls);
-	if (retval)
-		goto bad_snapshot_cleanup_io;
-
-	return p;
-
-bad_snapshot_cleanup_io:
-pr_info("snap 1");
-	if (p->io_context)
-		exit_io_context(p);
-bad_snapshot_cleanup_namespaces:
-pr_info("snap 2");
-	exit_task_namespaces(p);
-bad_snapshot_cleanup_mm:
-pr_info("snap 3");
-	if (p->mm)
-		mmput(p->mm);
-bad_snapshot_cleanup_signal:
-pr_info("snap 4");
-	if (!(clone_flags & CLONE_THREAD))
-		free_signal_struct(p->signal);
-bad_snapshot_cleanup_sighand:
-pr_info("snap 5");
-	__cleanup_sighand(p->sighand);
-bad_snapshot_cleanup_fs:
-pr_info("snap 6");
-	exit_fs(p); // blocking
-bad_snapshot_cleanup_files:
-pr_info("snap 7");
-	exit_files(p); // blocking
-bad_snapshot_cleanup_semundo:
-pr_info("snap 8");
-	exit_sem(p);
-bad_snapshot_cleanup_security:
-pr_info("snap 9");
-	security_task_free(p);
-bad_snapshot_cleanup_audit:
-pr_info("snap 10");
-	audit_free(p);
-bad_snapshot_cleanup_perf:
-pr_info("snap 11");
-	perf_event_free_task(p);
-bad_snapshot_cleanup_policy:
-pr_info("snap 12");
-#ifdef CONFIG_NUMA
-	mpol_put(p->mempolicy);
-bad_snapshot_cleanup_threadgroup_lock:
-#endif
-	delayacct_tsk_free(p);
-bad_snapshot_cleanup_free:
-	p->state = TASK_DEAD;
-	free_task(p);
-snapshot_out:
-pr_info("snap 13");
-	return ERR_PTR(retval);
-}
-*/
-
-
 //p->composition = dup_task_struct(c, NUMA_NO_NODE);
 //p->composition = copy_process(CLONE_ATOMIZE | SIGCHLD, 0, 0, NULL, NULL,
 //			      0, 0, NUMA_NO_NODE);
@@ -2897,7 +2774,7 @@ int transmutation(void)
 
 	// Avoid loop
 	if (!c->main_image) {
-		pr_info("NAOOO NOVOOO: transmutation");
+		pr_info("NAOOO FALHOUUUUU: transmutation");
 		return 0;
 	} else {
 		pr_info("NOVO: transmutation");
@@ -2912,6 +2789,9 @@ int transmutation(void)
 	//p->composition = copy_process(SIGCHLD, 0, 0, NULL, NULL,
 	//		      0, 0, NUMA_NO_NODE);
 
+pr_info("===== DEBUG ====");
+pr_info("Se: %p x %p", &c->se, &p->composition->se);
+pr_info("Se->group_node: %p x %p", &c->se.group_node, &p->composition->se.group_node);
 
 	if (IS_ERR(p->composition)) {
 		retval = PTR_ERR(p->composition);
@@ -3091,7 +2971,7 @@ pr_info("context_switch 2: ROTINAS DE LOCK");
 		prev->active_mm = NULL;
 		rq->prev_mm = oldmm;
 	}
-
+pr_info("Atualizando RQ");
 	/* Here we just switch the register state and the stack. */
 pr_info("context_switch 2: REMOVENDO ROTINA DE LOCK");
 	rq_unpin_lock(rq, rf);
@@ -3115,10 +2995,10 @@ int alternate_elements(struct task_struct *prev, struct task_struct *next)
 
 	cpu = smp_processor_id();
 	rq = cpu_rq(cpu);
-
+//rq = task_rq_lock(task, &flags);
+/* manipulate the task's runqueue */
+//task_rq_unlock(rq, &flags);
 pr_info("===== LOCKEDDDD");
-pr_info("Se: %p x %p", &prev->se, &next->se);
-pr_info("Se->group_node: %p x %p", &prev->se.group_node, &next->se.group_node);
 	rq_lock(rq, &rf);
 	context_switch_2(rq, prev, next, &rf);
 
